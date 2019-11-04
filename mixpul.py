@@ -8,12 +8,15 @@ import torch.nn as nn
 from torch.autograd import Variable
 import losses,ramps
 from collections import OrderedDict
-import  pickle
-import  os
+import pickle
+import os
 import random
 from MLP import MLP
+from RN_mining import RN_mining
+import torch.utils.data
 
-use_cuda = torch.cuda.is_available()
+#use_cuda = torch.cuda.is_available()
+os.environ["CUDA_VISIBLE_DEVICES"] = "2"
 
 def mixup_data(x, y, alpha=1.0):
     '''Compute the mixup data. Return mixed inputs, mixed target, and lambda'''
@@ -267,14 +270,16 @@ def train(trainloader, unlabelledloader, model, ema_model, optimizer, epoch):
             target_var = torch.autograd.Variable(target.to(device))
             ### model
             output = model(input_var.float())
+
+            # sharpening
+            #output = output**2 / sum([x**2 for x in output])
+
             #print ("output",output[0:6])
             #print ("target",target[0:6])
             class_loss = class_criterion(output, target_var) / len(output)
 
         #print("class_loss",class_loss)
         meters.update('class_loss', class_loss.item())
-
-
 
         ### get ema loss. We use the actual samples(not the mixed up samples ) for calculating EMA loss
         minibatch_size = len(target_var)
@@ -333,16 +338,20 @@ def train(trainloader, unlabelledloader, model, ema_model, optimizer, epoch):
         # labeled_minibatch_size = target_var.data.ne(NO_LABEL).sum().type(torch.cuda.FloatTensor)
         # assert labeled_minibatch_size > 0
 
-
-        p_score, _ = output.topk(1, 1, True, True)
-        u_score, _ = cons_logit.topk(1, 1, True, True)
-        pairwise_ranking_loss = max(0, u_score.view(-1).mean() - p_score.view(-1).mean())
-
+        #p_score, _ = output.topk(1, 1, True, True)
+        #u_score, _ = cons_logit.topk(1, 1, True, True)
+        p_score = output
+        u_score = cons_logit
+        gamma = 0.001
+        pairwise_ranking_loss = max(0, u_score.view(-1).mean() - p_score.view(-1).mean() - gamma)
 
         #loss = mixup_consistency_loss
         #print(class_loss)
-        #loss = class_loss + 0.1 * mixup_consistency_loss
-        loss = class_loss + 0.1 * mixup_consistency_loss + 0.1 * pairwise_ranking_loss
+        #loss = pairwise_ranking_loss + 1 * mixup_consistency_loss
+        #loss = 0.1 * pairwise_ranking_loss + 10 * mixup_consistency_loss
+        #loss = class_loss + 0.01 * mixup_consistency_loss
+        loss = class_loss + 100 * mixup_consistency_loss + 0.01 * pairwise_ranking_loss
+        #print ('pairwise ranking loss: ', pairwise_ranking_loss)
 
         #print (class_loss)
         #print (mixup_consistency_loss)
@@ -492,14 +501,14 @@ def run(train_x, train_y, test_x, test_y):
     args = parser.parse_args()
 
     input_size = train_x.shape[1]
-    hidden_size1 = 512
-    hidden_size2 = 128
+    hidden_size1 = 256
     num_classes = 2
 
 #    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     model = MLP(input_size, hidden_size1, num_classes).to(device)
     ema_model = MLP(input_size, hidden_size1, num_classes).to(device)
+    # 0.01 for ethn, krvsk
     optimizer = pt.optim.SGD(model.parameters(), lr=0.001, momentum=0.9)
 
 #    from torchvision import transforms
@@ -549,13 +558,26 @@ def run(train_x, train_y, test_x, test_y):
         batch_size=100
     )
 
-    #neg_idx=list(neg_idx)
-    n_sample_idx_u=random.sample(range(train_neg_X.shape[0]),int(0.5*train_neg_X.shape[0]))
+
+    # fraction = 0.5 on krvskp
+    # reliable negative mining
+    #rn_method = 'NB'
+    #rn_method = 'distance'
+    #rn_method = 'SVM'
+    #rn_method = 'RF'
+    rn_method = 'rand'
+    n_sample_idx_u = RN_mining(train_x, train_y, rn_method, 0.5)
+
     pretrain_x=train_pos_X
     pretrain_y=train_pos_y
     while len(pretrain_y) + len(train_pos_y) <= len(n_sample_idx_u):
         pretrain_x = torch.cat((pretrain_x, train_pos_X), 0)
         pretrain_y = torch.cat((pretrain_y, train_pos_y), 0)
+
+    #print (n_sample_idx_u)
+    #print (pretrain_x.shape)
+    #print (pretrain_y.shape)
+    #print (train_neg_X[n_sample_idx_u].shape)
 
     pretrain_x = torch.cat((pretrain_x, train_neg_X[n_sample_idx_u]), 0)
     pretrain_y = torch.cat((pretrain_y, train_neg_y[n_sample_idx_u]), 0)
@@ -569,7 +591,7 @@ def run(train_x, train_y, test_x, test_y):
         batch_size=100
     )
 
-    for epoch in range(args.start_epoch, args.epochs):
+    for epoch in range(args.start_epoch, args.epochs + 100):
         pre_train(trainloader, model, optimizer, epoch)
         print("=========================:\n")
         prec1 = validate(validloader, model, global_step, epoch + 1)
@@ -578,7 +600,7 @@ def run(train_x, train_y, test_x, test_y):
     val_error_list.append('====')
 
     #ema_model=model
-    for epoch in range(args.start_epoch, args.start_epoch + 30):
+    for epoch in range(args.start_epoch, args.start_epoch + 10):
 
         #pre_train(trainloader, model, optimizer, epoch)
         train(P_loader, U_loader, model, ema_model, optimizer, epoch)
