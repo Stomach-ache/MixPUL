@@ -170,8 +170,8 @@ def pre_train(trainloader, model, optimizer, epoch):
     i = -1
     for (input, target) in trainloader:
 
-        if False:
-        #if args.mixup_sup_alpha:
+        #if False:
+        if args.mixup_sup_alpha:
             if use_cuda:
                 input, target = input.to(device), target.to(device)
             input_var, target_var = Variable(input), Variable(target)
