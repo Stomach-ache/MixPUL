@@ -88,7 +88,7 @@ def update_ema_variables(model, ema_model, alpha, global_step):
 
 parser = argparse.ArgumentParser(description='Interpolation consistency training')
 
-parser.add_argument('--pseudo_label', default='single', choices=['single', 'mean_teacher'],
+parser.add_argument('--pseudo_label', choices=['single', 'mean_teacher'],
                     help='pseudo label generated from either a single model or mean teacher model')
 parser.add_argument('--epochs', default=90, type=int, metavar='N',
                     help='number of total epochs to run')
@@ -101,9 +101,9 @@ parser.add_argument('--mixup_consistency', default=1.0, type=float,
 parser.add_argument('--consistency_type', default="mse", type=str, metavar='TYPE',
                     choices=['mse', 'kl'],
                     help='consistency loss type to use')
-parser.add_argument('--consistency_rampup_starts', default=30, type=int, metavar='EPOCHS',
+parser.add_argument('--consistency_rampup_starts', default=1, type=int, metavar='EPOCHS',
                     help='epoch at which consistency loss ramp-up starts')
-parser.add_argument('--consistency_rampup_ends', default=30, type=int, metavar='EPOCHS',
+parser.add_argument('--consistency_rampup_ends', default=1, type=int, metavar='EPOCHS',
                     help='lepoch at which consistency loss ramp-up ends')
 parser.add_argument('--mixup_sup_alpha', default=1.0, type=float,
                     help='for supervised loss, the alpha parameter for the beta distribution from where the mixing lambda is drawn')
@@ -165,6 +165,10 @@ class MLP(pt.nn.Module):
 
 def pre_train(trainloader, model, optimizer, epoch):
     import utils
+    
+    # switch to train mode
+    model.train()
+    
     meters = utils.AverageMeterSet()
     class_criterion = nn.CrossEntropyLoss().to(device)
     i = -1
@@ -249,6 +253,11 @@ def train(trainloader, unlabelledloader, model, ema_model, optimizer, epoch):
     else:
         assert False, args.consistency_type
 
+    # switch to train mode
+    model.train()
+    ema_model.train()
+        
+        
     import utils
     import time
     meters = utils.AverageMeterSet()
@@ -272,6 +281,7 @@ def train(trainloader, unlabelledloader, model, ema_model, optimizer, epoch):
                 input, target, u = input.to(device), target.to(device), u.to(device)
             input_var, target_var, u_var = Variable(input), Variable(target), Variable(u)
 
+            #IF False:
             if args.mixup_hidden:
                 ### model
                 output_mixed_l, target_a_var, target_b_var, lam = model(input_var, target_var, mixup_hidden=True,
@@ -357,7 +367,7 @@ def train(trainloader, unlabelledloader, model, ema_model, optimizer, epoch):
                 mixup_consistency_weight = get_current_consistency_weight(args.mixup_consistency, epoch, i,
                                                                           len(unlabelledloader))
             meters.update('mixup_cons_weight', mixup_consistency_weight)
-            # mixup_consistency_loss = mixup_consistency_weight * mixup_consistency_loss
+            mixup_consistency_loss = mixup_consistency_weight * mixup_consistency_loss
         else:
             mixup_consistency_loss = 0
             meters.update('mixup_cons_loss', 0)
@@ -369,15 +379,15 @@ def train(trainloader, unlabelledloader, model, ema_model, optimizer, epoch):
         #u_score, _ = cons_logit.topk(1, 1, True, True)
         p_score = output
         u_score = cons_logit
-        gamma = 0.1
+        gamma = 0.2
         pairwise_ranking_loss = max(0, u_score.view(-1).mean() - p_score.view(-1).mean() - gamma)
 
         #loss = mixup_consistency_loss
         #print(class_loss)
-        #loss = pairwise_ranking_loss + 1 * mixup_consistency_loss
-        loss = 1 * pairwise_ranking_loss - 0.0001 * mixup_consistency_loss
-        #loss = class_loss + 10 * mixup_consistency_loss
-        #loss = class_loss + 0.001 * mixup_consistency_loss + 0.001 * pairwise_ranking_loss
+        #loss = pairwise_ranking_loss - 1 * mixup_consistency_loss
+        #loss = 0 * pairwise_ranking_loss + 1 * mixup_consistency_loss
+        loss = class_loss + 1 * mixup_consistency_loss
+        #loss = class_loss + 1 * mixup_consistency_loss + 0 * pairwise_ranking_loss
         #print ('pairwise ranking loss: ', pairwise_ranking_loss)
 
         #print (class_loss)
@@ -536,7 +546,10 @@ def run(train_x, train_y, test_x, test_y):
     model = MLP(input_size, hidden_size1, num_classes).to(device)
     ema_model = MLP(input_size, hidden_size1, num_classes).to(device)
     # 0.01 for ethn, krvsk
-    optimizer = pt.optim.SGD(model.parameters(), lr=1e-5, momentum=0.9)#
+    optimizer = pt.optim.SGD(model.parameters(), lr=1e-5, momentum=0.9, weight_decay=1e-4, nesterov =True)#
+    
+    args.mixup_hidden = False
+    
     #optimizer = pt.optim.Adam(model.parameters(), lr=1e-5)
 
 #    from torchvision import transforms
@@ -569,7 +582,7 @@ def run(train_x, train_y, test_x, test_y):
     P_loader = torch.utils.data.DataLoader(
         # 从数据库中每次抽出batch size个样本
         dataset=torch_dataset,
-        batch_size=200
+        batch_size=128
     )
 
 
@@ -578,7 +591,7 @@ def run(train_x, train_y, test_x, test_y):
     U_loader = torch.utils.data.DataLoader(
         # 从数据库中每次抽出batch size个样本
         dataset=torch_dataset,
-        batch_size=200
+        batch_size=128
     )
 
     test_x_=torch.tensor(test_x)
@@ -587,7 +600,7 @@ def run(train_x, train_y, test_x, test_y):
     validloader = torch.utils.data.DataLoader(
         # 从数据库中每次抽出batch size个样本
         dataset=torch_dataset,
-        batch_size=200
+        batch_size=128
     )
 
 
@@ -599,7 +612,7 @@ def run(train_x, train_y, test_x, test_y):
     #rn_method = 'RF'
     rn_method = 'rand'
     #n_sample_idx_u = RN_mining(train_x, train_y, rn_method, 0.5)
-    n_sample_idx_u=random.sample(range(train_neg_X.shape[0]), min(train_pos_X.shape[0], int(0.4*train_neg_X.shape[0])))
+    n_sample_idx_u=random.sample(range(train_neg_X.shape[0]), min(train_pos_X.shape[0] * 15, int(0.4*train_neg_X.shape[0])))
 
     pretrain_x=train_pos_X
     pretrain_y=train_pos_y
@@ -622,27 +635,28 @@ def run(train_x, train_y, test_x, test_y):
     trainloader = torch.utils.data.DataLoader(
         # 从数据库中每次抽出batch size个样本
         dataset=torch_dataset,
-        batch_size=200
+        batch_size=128
     )
-    
-    
 
-    for epoch in range(args.start_epoch, args.epochs-10):
+    for epoch in range(args.start_epoch, args.epochs):
         pre_train(trainloader, model, optimizer, epoch)
         print("=========================:\n")
         prec1 = validate(validloader, model, global_step, epoch + 1)
+        
+        torch.cuda.empty_cache()
 
     train_error_list.append('====')
     val_error_list.append('====')
 
     #ema_model=model
-    for epoch in range(args.start_epoch, args.start_epoch + 100):
+    for epoch in range(args.start_epoch, args.start_epoch + 50):
 
         #pre_train(trainloader, model, optimizer, epoch)
-        train(P_loader, U_loader, model, ema_model, optimizer, epoch)
+        train(trainloader, U_loader, model, ema_model, optimizer, epoch)
         print("Evaluating the primary model on validation set:\n")
         output, prec1 = validate(validloader, model, global_step, epoch + 1)
 
+        torch.cuda.empty_cache()
 
 
     train_log = OrderedDict()
